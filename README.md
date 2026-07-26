@@ -35,7 +35,14 @@ Trace over a bridge with your pen and just close the ~1.4 mm gap freehand.
 | `circuit_ruler_draft.png` | Top-view draft render (bridges highlighted). |
 | `circuit_ruler.py` | Generator: arranges the SVG symbols, adds the scale, bridges every island. |
 | `svg_source.py` | Faithful `template_ruler.svg` parser + symbol segmenter. |
-| `template_ruler.svg` | Original hand-drawn source artwork (unmodified). |
+| [`template_ruler.svg`](template_ruler.svg) | Original hand-drawn source artwork (unmodified). |
+
+## Source artwork
+
+The 19 symbols are lifted straight from this drawing —
+**[`template_ruler.svg`](template_ruler.svg)**:
+
+![source artwork](template_ruler.svg)
 
 ## Print settings
 
