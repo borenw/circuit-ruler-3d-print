@@ -1,61 +1,62 @@
 #!/usr/bin/env python3
 """
-Circuit-Symbol Stencil Ruler  -  3D-print generator
-====================================================
+Circuit-Symbol Stencil Ruler  -  3D-print generator  (faithful edition)
+=======================================================================
 
-Generates a printable circuit-drafting stencil ruler from a clean parametric
-definition (mm units).  The plate carries:
+Uses the ACTUAL symbol shapes drawn in `template_ruler.svg` (parsed by
+svg_source.py) — 19 schematic symbols — and only rearranges / resizes them
+into a tidy grid on a printable stencil plate.  The plate also carries an
+engraved mm/cm measuring scale.
 
-  * an engraved mm / cm measuring scale along the top edge (0..170 mm)
-  * a grid of THROUGH-CUT circuit symbols you trace with a pen
-    (R, R-box, C, L, diode, battery, ground, switch, AC source, lamp, NPN)
-  * engraved symbol labels + a title block
-  * a hanging hole
+The symbols are cut clean through the plate as ~1.5 mm channels you trace
+with a pen.  Any enclosed "island" (inside a triangle, gate body, circle,
+rectangle, coil loop, output bubble, …) would drop out of a plain stencil,
+so the generator automatically detects every island and ties it back to the
+body with tiny **bridges** — solid uncut ties strong enough to survive a
+print and normal handling.
 
 Outputs:
-  circuit_ruler_draft.png   - top-view draft render (review before printing)
-  circuit_ruler.stl         - watertight solid for slicing / 3D printing
-
-The source artwork (template_ruler.svg, a hand-sketched version of the same
-symbol family) is kept in the repo for reference.
+  circuit_ruler_draft.png   - top-view draft (bridges highlighted)
+  circuit_ruler.stl         - watertight solid for slicing / printing
 """
 
 import numpy as np
 import shapely.geometry as sg
-from shapely.ops import unary_union
-from shapely.affinity import translate, rotate, scale as shp_scale
+from shapely.ops import unary_union, nearest_points
+from shapely.affinity import translate, scale as shp_scale
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon as MplPoly
 from matplotlib.textpath import TextPath
 from matplotlib.font_manager import FontProperties
 
-# ----------------------------------------------------------------------------
-# Global parameters (millimetres)
-# ----------------------------------------------------------------------------
-L      = 180.0     # plate length  (X)
-W      = 72.0      # plate width   (Y)
-T      = 3.0       # plate thickness (Z)
-CORNER = 4.0       # rounded corner radius
-SW     = 1.5       # symbol channel width (traceable slot)
-ENGRAVE_DEPTH = 0.8   # depth of engraved scale / text
-DOT_R  = 1.6       # junction-node hole radius
+import svg_source
 
-SCALE_STRIP = 12.0   # height of top ruler strip
-SCALE_MAX   = 170    # last labelled mm mark
-SCALE_X0    = 5.0    # x of the 0-mm mark (left margin)
+# ----------------------------------------------------------------------------
+# parameters (millimetres)
+# ----------------------------------------------------------------------------
+COLS, ROWS = 5, 4
+L = 190.0          # plate length  (X)
+W = 118.0          # plate width   (Y)
+T = 3.0            # plate thickness (Z)
+CORNER = 4.0
+MX = 7.0           # side margin
+SCALE_STRIP = 12.0 # top ruler strip
+TITLE_STRIP = 9.0  # bottom title strip
+CELL_PAD = 5.0     # blank border kept inside each cell
+
+CHANNEL = 1.5      # traced slot width
+BRIDGE_W = 1.4     # island-tie width
+ENGRAVE_DEPTH = 0.8
+SCALE_MAX = 185
+SCALE_X0 = 5.0
 
 FONT = FontProperties(family="DejaVu Sans", weight="bold")
 
 # ----------------------------------------------------------------------------
-# geometry helpers
+# helpers
 # ----------------------------------------------------------------------------
-def rounded_rect(x0, y0, w, h, r):
-    return sg.box(x0, y0, x0 + w, y0 + h).buffer(-0.0).buffer(0)  # placeholder
-
 def rrect(x0, y0, w, h, r):
-    """axis-aligned rounded rectangle as a polygon"""
     return sg.box(x0 + r, y0, x0 + w - r, y0 + h).union(
            sg.box(x0, y0 + r, x0 + w, y0 + h - r)).union(
            sg.Point(x0 + r,     y0 + r    ).buffer(r)).union(
@@ -63,34 +64,17 @@ def rrect(x0, y0, w, h, r):
            sg.Point(x0 + r,     y0 + h - r).buffer(r)).union(
            sg.Point(x0 + w - r, y0 + h - r).buffer(r))
 
-def strokes(polylines, width=SW):
-    """turn a list of point-lists into a filled 'ink' region (rounded caps)."""
-    parts = []
-    for pl in polylines:
-        if len(pl) == 1:
-            parts.append(sg.Point(pl[0]).buffer(width / 2))
-        else:
-            parts.append(sg.LineString(pl).buffer(width / 2,
-                          cap_style=1, join_style=1))
-    return unary_union(parts)
-
-def arc(cx, cy, r, a0, a1, n=24):
-    a = np.linspace(np.radians(a0), np.radians(a1), n)
-    return list(zip(cx + r * np.cos(a), cy + r * np.sin(a)))
-
 def text_poly(s, size, x, y, ha="center", va="center"):
-    """filled outline of text as a valid shapely geometry (letter holes handled
-    by even-odd containment depth, so results extrude to watertight solids)."""
     tp = TextPath((0, 0), s, size=size, prop=FONT)
-    loops = [sg.Polygon(l).buffer(0) for l in tp.to_polygons(closed_only=True)
-             if len(l) >= 3]
-    loops = [p for p in loops if (not p.is_empty) and p.area > 1e-6]
+    raw = [np.asarray(l) for l in tp.to_polygons(closed_only=True) if len(l) >= 3]
+    keep = [(r, sg.Polygon(r).buffer(0)) for r in raw]
+    keep = [(r, p) for r, p in keep if (not p.is_empty) and p.area > 1e-6]
     solids, holes = [], []
-    for i, p in enumerate(loops):
-        pt = p.representative_point()
-        depth = sum(1 for j, q in enumerate(loops)
-                    if j != i and q.contains(pt))
-        (holes if depth % 2 else solids).append(p)
+    for i, (ri, pi) in enumerate(keep):
+        pt = sg.Point(ri[0])          # a vertex ON ring i (never inside its hole)
+        depth = sum(1 for j, (rj, pj) in enumerate(keep)
+                    if j != i and pj.contains(pt))
+        (holes if depth % 2 else solids).append(pi)
     geom = unary_union(solids)
     if holes:
         geom = geom.difference(unary_union(holes))
@@ -101,184 +85,106 @@ def text_poly(s, size, x, y, ha="center", va="center"):
     dy = y - {"bottom": miny, "center": (miny + maxy) / 2, "top": maxy}[va]
     return translate(geom, dx, dy)
 
-# ----------------------------------------------------------------------------
-# circuit symbols  (local coords, centred at 0,0, ~26 wide x 14 tall)
-#   returns (ink_geometry, [extra node-dot centres])
-# ----------------------------------------------------------------------------
-LEAD = 13.0   # half length of a symbol's horizontal leads
+def polylines_to_cut(polylines, width):
+    return unary_union([sg.LineString(p).buffer(width / 2, cap_style=1,
+                        join_style=1) for p in polylines if len(p) >= 2])
 
-def sym_resistor_zig():
-    p = [(-LEAD, 0), (-7, 0)]
-    xs = np.linspace(-7, 7, 9)
-    for i, xv in enumerate(xs[1:-1]):
-        p.append((xv, 4 if i % 2 == 0 else -4))
-    p += [(7, 0), (LEAD, 0)]
-    return strokes([p]), []
-
-def sym_resistor_box():
-    leads = [[(-LEAD, 0), (-8, 0)], [(8, 0), (LEAD, 0)]]
-    box = [(-8, -4), (8, -4), (8, 4), (-8, 4), (-8, -4)]
-    return strokes(leads + [box]), []
-
-def sym_capacitor():
-    return strokes([
-        [(-LEAD, 0), (-2, 0)], [(-2, -6), (-2, 6)],
-        [(2, -6), (2, 6)],     [(2, 0), (LEAD, 0)],
-    ]), []
-
-def sym_inductor():
-    parts = [[(-LEAD, 0), (-8, 0)], [(8, 0), (LEAD, 0)]]
-    for cx in (-6, -2, 2, 6):
-        parts.append(arc(cx, 0, 2, 0, 180))
-    return strokes(parts), []
-
-def sym_diode():
-    tri = [(-4, -5), (-4, 5), (4, 0), (-4, -5)]
-    return strokes([
-        [(-LEAD, 0), (-4, 0)], tri,
-        [(4, -5), (4, 5)], [(4, 0), (LEAD, 0)],
-    ]), []
-
-def sym_battery():
-    return strokes([
-        [(-LEAD, 0), (-6, 0)],
-        [(-6, -6), (-6, 6)], [(-3, -3), (-3, 3)],
-        [(1, -6), (1, 6)],   [(4, -3), (4, 3)],
-        [(4, 0), (LEAD, 0)],
-    ]), []
-
-def sym_ground():
-    return strokes([
-        [(0, 7), (0, 0)],
-        [(-6, 0), (6, 0)], [(-4, -3), (4, -3)], [(-2, -6), (2, -6)],
-    ]), []
-
-def sym_switch():
-    ink = strokes([
-        [(-LEAD, 0), (-7, 0)],
-        [(-7, 0), (6, 6)],
-        [(7, 0), (LEAD, 0)],
-    ])
-    return ink, [(-7, 0), (7, 0)]
-
-def sym_ac_source():
-    circ = arc(0, 0, 7, 0, 360)
-    sine = [(x, 3.2 * np.sin(np.radians(x * 40)))
-            for x in np.linspace(-4.5, 4.5, 30)]
-    return strokes([
-        [(-LEAD, 0), (-7, 0)], [(7, 0), (LEAD, 0)],
-        circ, sine,
-    ]), []
-
-def sym_lamp():
-    circ = arc(0, 0, 7, 0, 360)
-    d = 7 / np.sqrt(2)
-    return strokes([
-        [(-LEAD, 0), (-7, 0)], [(7, 0), (LEAD, 0)],
-        circ, [(-d, -d), (d, d)], [(-d, d), (d, -d)],
-    ]), []
-
-def sym_npn():
-    circ = arc(0, 0, 8, 0, 360)
-    base = [[(-LEAD, 0), (-3, 0)], [(-3, -4.5), (-3, 4.5)]]
-    coll = [[(-3, 2.5), (4.5, 6.5)], [(4.5, 6.5), (4.5, 11)]]
-    emit = [[(-3, -2.5), (4.5, -6.5)], [(4.5, -6.5), (4.5, -11)]]
-    arrow = [[(4.5, -6.5), (2.0, -6.0)], [(4.5, -6.5), (3.8, -3.9)]]
-    return strokes([circ] + base + coll + emit + arrow), []
-
-SYMBOLS = [
-    ("Resistor",   sym_resistor_zig),
-    ("Resistor",   sym_resistor_box),
-    ("Capacitor",  sym_capacitor),
-    ("Inductor",   sym_inductor),
-    ("Diode",      sym_diode),
-    ("Battery",    sym_battery),
-    ("Ground",     sym_ground),
-    ("Switch",     sym_switch),
-    ("AC Source",  sym_ac_source),
-    ("Lamp",       sym_lamp),
-    ("NPN",        sym_npn),
-    ("Node",       None),          # special: single dot hole
-]
+def components(geom):
+    if geom.is_empty:
+        return []
+    return list(geom.geoms) if geom.geom_type.startswith("Multi") else [geom]
 
 # ----------------------------------------------------------------------------
-# build the full 2D layout -> lists of shapely geoms
+# bridges: tie every enclosed island back to the body
+# ----------------------------------------------------------------------------
+def add_bridges(plate, cut):
+    """Return (bridges_union, n_islands). Bridges are solid ties to subtract
+    from `cut` so nothing drops out of the stencil."""
+    bridges = []
+    for _ in range(10):
+        active = cut.difference(unary_union(bridges)) if bridges else cut
+        comps = components(plate.difference(active))
+        if len(comps) <= 1:
+            break
+        main = max(comps, key=lambda p: p.area)
+        islands = [p for p in comps if p is not main]
+        for isl in islands:
+            per = isl.exterior.length
+            k = 1 if per < 10 else (2 if per < 34 else 3)
+            for j in range(k):
+                pt = isl.exterior.interpolate((j + 0.5) / k, normalized=True)
+                near = nearest_points(main, pt)[0]        # across the channel
+                seg = sg.LineString([(pt.x, pt.y), (near.x, near.y)])
+                if seg.length < 1e-6:
+                    continue
+                # extend both ends so the tie fully bonds island <-> body
+                v = np.array([near.x - pt.x, near.y - pt.y])
+                v = v / (np.hypot(*v) + 1e-9) * 1.2
+                seg = sg.LineString([(pt.x - v[0], pt.y - v[1]),
+                                     (near.x + v[0], near.y + v[1])])
+                bridges.append(seg.buffer(BRIDGE_W / 2, cap_style=2))
+    return (unary_union(bridges) if bridges else sg.Polygon()), \
+           len(components(plate.difference(cut))) - 1
+
+# ----------------------------------------------------------------------------
+# layout
 # ----------------------------------------------------------------------------
 def build_layout():
     body = rrect(0, 0, L, W, CORNER)
+    syms = svg_source.symbols()
 
-    through = []     # full-depth cutouts (symbols, node dots, hang hole)
-    engrave = []     # shallow recesses (scale, labels, title)
+    gx0, gx1 = MX, L - MX
+    gy0, gy1 = TITLE_STRIP, W - SCALE_STRIP
+    cw = (gx1 - gx0) / COLS
+    ch = (gy1 - gy0) / ROWS
 
-    # ---- hanging hole (top-right corner) ----
-    through.append(sg.Point(L - 7, W - 6).buffer(2.6))
+    sym_cuts = []
+    for idx, s in enumerate(syms):
+        c, r = idx % COLS, idx // COLS
+        cx = gx0 + cw * (c + 0.5)
+        cy = gy1 - ch * (r + 0.5)
+        f = min((cw - CELL_PAD) / s['w'], (ch - CELL_PAD) / s['h'])
+        pls = [p * f + [cx, cy] for p in s['polylines']]
+        sym_cuts.append(polylines_to_cut(pls, CHANNEL))
+    through = unary_union(sym_cuts)
 
-    # ---- measuring scale along top edge ----
+    # hanging hole (top-right, above the grid inside the scale strip corner)
+    hang = sg.Point(L - 7, W - 6).buffer(2.6)
+    through = unary_union([through, hang])
+
+    bridges, n_isl = add_bridges(body, through)
+    through_final = through.difference(bridges)
+
+    # ---- engraved measuring scale + title ----
+    engrave = []
     y_top = W
     for mm in range(0, SCALE_MAX + 1):
         x = SCALE_X0 + mm
         if x > L - 4:
             break
+        tl, tw = (6.5, 0.5) if mm % 10 == 0 else \
+                 (4.0, 0.45) if mm % 5 == 0 else (2.5, 0.4)
+        engrave.append(sg.box(x - tw, y_top - tl, x + tw, y_top - 0.6))
         if mm % 10 == 0:
-            tick_len, tw = 6.5, 0.5
-        elif mm % 5 == 0:
-            tick_len, tw = 4.0, 0.45
-        else:
-            tick_len, tw = 2.5, 0.4
-        engrave.append(sg.box(x - tw, y_top - tick_len, x + tw, y_top - 0.6))
-        if mm % 10 == 0:
-            engrave.append(text_poly(str(mm // 10), 3.0, x,
-                                     y_top - tick_len - 2.4, va="top"))
-    # "cm" unit tag
-    engrave.append(text_poly("cm", 3.0, SCALE_X0 + SCALE_MAX + 3,
-                             y_top - 4.5, ha="left", va="center"))
-
-    # ---- symbol grid ----
-    cols, rows = 4, 3
-    gx0 = 6.0
-    title_h = 8.0                       # bottom strip reserved for title
-    gy0 = title_h + 1.0
-    gw = L - 2 * gx0
-    gh = (W - SCALE_STRIP) - gy0 - 1.0
-    cw, ch = gw / cols, gh / rows
-    label_band = 4.0
-    for idx, (name, fn) in enumerate(SYMBOLS):
-        c = idx % cols
-        r = idx // cols
-        cx = gx0 + cw * (c + 0.5)
-        cell_bottom = gy0 + ch * (rows - 1 - r)
-        sym_cy = cell_bottom + label_band + (ch - label_band) / 2
-        if fn is None:                       # node dot
-            through.append(sg.Point(cx, sym_cy).buffer(DOT_R))
-        else:
-            ink, dots = fn()
-            minx, miny, maxx, maxy = ink.bounds
-            fx = (cw - 5.0) / (maxx - minx)
-            fy = (ch - label_band - 2.0) / (maxy - miny)
-            f = min(fx, fy, 1.0)
-            ink = shp_scale(ink, f, f, origin=(0, 0))
-            ink = translate(ink, cx, sym_cy)
-            through.append(ink)
-            for dx, dy in dots:
-                through.append(sg.Point(cx + dx * f,
-                                        sym_cy + dy * f).buffer(DOT_R * 0.8))
-        engrave.append(text_poly(name, 2.6, cx, cell_bottom + 1.0, va="bottom"))
-
-    # ---- title block ----
-    engrave.append(text_poly("CIRCUIT  STENCIL  RULER", 4.4, L / 2, 1.8,
+            engrave.append(text_poly(str(mm // 10), 3.0, x, y_top - tl - 2.3,
+                                     va="top"))
+    engrave.append(text_poly("cm", 3.0, SCALE_X0 + (SCALE_MAX // 10) * 10 + 3,
+                             y_top - 4.5, ha="left"))
+    engrave.append(text_poly("CIRCUIT  STENCIL  RULER", 4.6, L / 2, 1.9,
                              va="bottom"))
+    engrave = unary_union(engrave)
 
-    return body, unary_union(through), unary_union(engrave)
-
+    print(f"symbols={len(syms)}  islands bridged={n_isl}  "
+          f"bridges={len(components(bridges))}")
+    return body, through_final, engrave, bridges
 
 # ----------------------------------------------------------------------------
 # PNG draft
 # ----------------------------------------------------------------------------
 def _poly_path(poly):
-    """matplotlib Path for a shapely Polygon, holes as true holes (nonzero)."""
     from matplotlib.path import Path
     from shapely.geometry.polygon import orient
-    poly = orient(poly, sign=1.0)          # exterior CCW, interiors CW
+    poly = orient(poly, sign=1.0)
     verts, codes = [], []
     for ring in [poly.exterior, *poly.interiors]:
         xy = np.asarray(ring.coords)
@@ -290,92 +196,71 @@ def _poly_path(poly):
 
 def _draw(ax, geom, **kw):
     from matplotlib.patches import PathPatch
-    if geom.is_empty:
-        return
-    polys = geom.geoms if geom.geom_type.startswith("Multi") else [geom]
-    for p in polys:
-        if p.is_empty or p.geom_type != "Polygon":
-            continue
-        ax.add_patch(PathPatch(_poly_path(p), **kw))
+    for p in components(geom):
+        if p.geom_type == "Polygon" and not p.is_empty:
+            ax.add_patch(PathPatch(_poly_path(p), **kw))
 
-def render_png(body, through, engrave, path):
-    fig, ax = plt.subplots(figsize=(L / 25.4, (W + 18) / 25.4), dpi=200)
+def render_png(body, through, engrave, bridges, path):
+    fig, ax = plt.subplots(figsize=(L / 22, (W + 22) / 22), dpi=200)
     plate = body.difference(through)
-    _draw(ax, plate, facecolor="#2f6f8f", edgecolor="#12384a",
-          linewidth=1.0, zorder=1)
+    _draw(ax, plate, facecolor="#2f6f8f", edgecolor="#12384a", linewidth=0.8, zorder=1)
     _draw(ax, engrave, facecolor="#bfe3f2", edgecolor="none", zorder=2)
-    ax.set_xlim(-6, L + 6)
-    ax.set_ylim(-6, W + 12)
-    ax.set_aspect("equal")
-    ax.axis("off")
-    ax.set_title("Circuit Stencil Ruler  —  print draft   "
-                 f"({L:.0f} × {W:.0f} × {T:.0f} mm)",
+    _draw(ax, bridges.intersection(plate), facecolor="none",
+          edgecolor="#e8813a", linewidth=1.1, zorder=3)      # highlight ties
+    ax.set_xlim(-6, L + 6); ax.set_ylim(-6, W + 12)
+    ax.set_aspect("equal"); ax.axis("off")
+    ax.set_title("Circuit Stencil Ruler — faithful SVG symbols + island "
+                 f"bridges (orange)   {L:.0f}×{W:.0f}×{T:.0f} mm",
                  fontsize=9, color="#12384a", pad=6)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print("wrote", path)
 
-
 # ----------------------------------------------------------------------------
-# STL export
+# STL
 # ----------------------------------------------------------------------------
 def export_stl(body, through, engrave, path):
     import trimesh
     from trimesh.creation import extrude_polygon
 
-    def polys(geom):
-        if geom.is_empty:
-            return []
-        gg = list(geom.geoms) if geom.geom_type.startswith("Multi") else [geom]
+    def clean(geom):
         out = []
-        for p in gg:
+        for p in components(geom):
             p = p.buffer(0)
-            if p.is_empty:
-                continue
-            out += list(p.geoms) if p.geom_type.startswith("Multi") else [p]
-        return [p for p in out if p.geom_type == "Polygon" and p.area > 0.02]
+            for q in components(p):
+                if q.geom_type == "Polygon" and q.area > 0.02:
+                    out.append(q)
+        return out
 
     def solidify(m):
-        m.merge_vertices()
-        m.update_faces(m.nondegenerate_faces())
+        m.merge_vertices(); m.update_faces(m.nondegenerate_faces())
         if not m.is_volume:
-            m.fix_normals()
-            trimesh.repair.fill_holes(m)
+            m.fix_normals(); trimesh.repair.fill_holes(m)
         return m
 
     base = solidify(extrude_polygon(body, T))
-
-    cuts, bad = [], 0
-    for p in polys(through):
-        m = extrude_polygon(p, T + 2.0)
-        m.apply_translation((0, 0, -1.0))            # through the whole plate
-        m = solidify(m)
+    cuts = []
+    for p in clean(through):
+        m = solidify(extrude_polygon(p, T + 2.0)); m.apply_translation((0, 0, -1))
         if m.is_volume:
             cuts.append(m)
-        else:
-            bad += 1
-    for p in polys(engrave):
-        m = extrude_polygon(p, ENGRAVE_DEPTH + 1.0)
-        m.apply_translation((0, 0, T - ENGRAVE_DEPTH))  # recess top face
-        m = solidify(m)
+    for p in clean(engrave):
+        m = solidify(extrude_polygon(p, ENGRAVE_DEPTH + 1.0))
+        m.apply_translation((0, 0, T - ENGRAVE_DEPTH))
         if m.is_volume:
             cuts.append(m)
-        else:
-            bad += 1
-
-    print(f"boolean: base - {len(cuts)} cutters ({bad} skipped non-volume) ...")
-    result = trimesh.boolean.difference([base] + cuts, engine="manifold")
-    result.merge_vertices()
-    result.export(path)
-    print(f"wrote {path}  watertight={result.is_watertight}  "
-          f"vol={result.volume/1000:.1f} cm^3  tris={len(result.faces)}")
-    return result
-
+    print(f"boolean: base - {len(cuts)} cutters ...")
+    res = trimesh.boolean.difference([base] + cuts, engine="manifold")
+    res.merge_vertices()
+    res.export(path)
+    print(f"wrote {path}  watertight={res.is_watertight}  "
+          f"vol={res.volume/1000:.1f} cm^3  tris={len(res.faces)}")
+    return res
 
 if __name__ == "__main__":
     import sys
-    body, through, engrave = build_layout()
-    render_png(body, through, engrave, "circuit_ruler_draft.png")
+    body, through, engrave, bridges = build_layout()
+    render_png(body, through, engrave, bridges, "circuit_ruler_draft.png")
     if "--stl" in sys.argv:
         export_stl(body, through, engrave, "circuit_ruler.stl")
