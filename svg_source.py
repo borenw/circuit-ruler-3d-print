@@ -10,6 +10,7 @@ shapes can be reproduced exactly, then arranged/sized onto the ruler.
 """
 import re
 import numpy as np
+import shapely.geometry as sg
 
 NUM = re.compile(r'[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:[eE][-+]?\d+)?')
 
@@ -107,6 +108,56 @@ def bounds(elems):
     allp = np.vstack([sp for el in elems for sp in el['subs']])
     return allp[:, 0].min(), allp[:, 1].min(), allp[:, 0].max(), allp[:, 1].max()
 
+def _is_straight(p):
+    if len(p) <= 2:
+        return True
+    d = p[-1] - p[0]
+    Ln = np.hypot(*d)
+    if Ln < 1e-9:
+        return False
+    n = np.array([-d[1], d[0]]) / Ln
+    return np.abs((p[1:-1] - p[0]) @ n).max() < 0.06 * Ln
+
+def _trim_leads(pls, lead_frac=0.22, cap_frac=0.30):
+    """Shorten long straight terminal leads so scaling is driven by the symbol
+    BODY, not its wires.  Faithful: only wire length changes, not the shapes.
+
+    A stroke counts as a lead only if it is straight, long, AND runs parallel to
+    the symbol's long axis — so plates, bars and switch levers (which cross the
+    axis) are kept as body, not mistaken for wires."""
+    allp = np.vstack(pls)
+    ex, ey = np.ptp(allp[:, 0]), np.ptp(allp[:, 1])
+    span = max(ex, ey)
+    axis = np.array([1.0, 0.0]) if ex >= ey else np.array([0.0, 1.0])
+    long_th = lead_frac * span
+    body = []
+    for p in pls:
+        seglen = np.hypot(*np.diff(p, axis=0).T).sum()
+        d = p[-1] - p[0]
+        dl = np.hypot(*d)
+        parallel = dl > 1e-9 and abs((d / dl) @ axis) > 0.94
+        if _is_straight(p) and seglen > long_th and parallel:
+            continue                          # a lead — drop from body estimate
+        body.append(p)
+    if not body:
+        return pls
+    bx = np.vstack(body)
+    x0, y0, x1, y1 = bx[:, 0].min(), bx[:, 1].min(), bx[:, 0].max(), bx[:, 1].max()
+    if max(x1 - x0, y1 - y0) < 0.12 * span:   # near-total collapse -> don't risk it
+        return pls
+    m = cap_frac * max(x1 - x0, y1 - y0)      # keep short lead stubs
+    box = sg.box(x0 - m, y0 - m, x1 + m, y1 + m)
+    out = []
+    for p in pls:
+        inter = sg.LineString(p).intersection(box)
+        if inter.is_empty:
+            continue
+        gs = inter.geoms if inter.geom_type.startswith("Multi") else [inter]
+        for g in gs:
+            if g.geom_type == "LineString" and g.length > 1e-6:
+                out.append(np.asarray(g.coords))
+    return out or pls
+
 def symbols(path="template_ruler.svg", D=12):
     """Segment the drawing into individual symbols (spatial clusters).
 
@@ -138,6 +189,7 @@ def symbols(path="template_ruler.svg", D=12):
                 arr = np.array(sp, float)
                 arr[:, 1] *= -1                      # flip y-up
                 pls.append(arr)
+        pls = _trim_leads(pls)
         allp = np.vstack(pls)
         cx = (allp[:, 0].min() + allp[:, 0].max()) / 2
         cy = (allp[:, 1].min() + allp[:, 1].max()) / 2

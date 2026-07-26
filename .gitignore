@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
 _svg_*.png
+_diag_*.png
 _verify*.png
