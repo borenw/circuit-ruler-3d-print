@@ -41,15 +41,16 @@ W = 118.0          # plate width   (Y)
 T = 3.0            # plate thickness (Z)
 CORNER = 4.0
 MX = 7.0           # side margin
-SCALE_STRIP = 12.0 # top ruler strip
-TITLE_STRIP = 9.0  # bottom title strip
+CM_STRIP = 12.0    # top strip: centimetre scale
+IN_STRIP = 12.0    # bottom strip: inch scale
 CELL_PAD = 5.0     # blank border kept inside each cell
 
 CHANNEL = 1.5      # traced slot width
 BRIDGE_W = 1.4     # island-tie width
 ENGRAVE_DEPTH = 0.8
-SCALE_MAX = 185
-SCALE_X0 = 5.0
+SCALE_MAX = 185    # last mm mark on the cm scale
+SCALE_X0 = 6.0     # x of the 0 mark (shared by both scales)
+INCH = 25.4
 
 FONT = FontProperties(family="DejaVu Sans", weight="bold")
 
@@ -134,7 +135,7 @@ def build_layout():
     syms = svg_source.symbols()
 
     gx0, gx1 = MX, L - MX
-    gy0, gy1 = TITLE_STRIP, W - SCALE_STRIP
+    gy0, gy1 = IN_STRIP, W - CM_STRIP
     cw = (gx1 - gx0) / COLS
     ch = (gy1 - gy0) / ROWS
 
@@ -155,8 +156,10 @@ def build_layout():
     bridges, n_isl = add_bridges(body, through)
     through_final = through.difference(bridges)
 
-    # ---- engraved measuring scale + title ----
+    # ---- engraved scales + title ----
     engrave = []
+
+    # centimetre scale along the TOP edge (ticks point down)
     y_top = W
     for mm in range(0, SCALE_MAX + 1):
         x = SCALE_X0 + mm
@@ -168,10 +171,30 @@ def build_layout():
         if mm % 10 == 0:
             engrave.append(text_poly(str(mm // 10), 3.0, x, y_top - tl - 2.3,
                                      va="top"))
-    engrave.append(text_poly("cm", 3.0, SCALE_X0 + (SCALE_MAX // 10) * 10 + 3,
+    engrave.append(text_poly("cm", 3.0, SCALE_X0 + (SCALE_MAX // 10) * 10 + 4,
                              y_top - 4.5, ha="left"))
-    engrave.append(text_poly("CIRCUIT  STENCIL  RULER", 4.6, L / 2, 1.9,
-                             va="bottom"))
+
+    # inch scale along the BOTTOM edge (ticks point up), 1/8" subdivisions
+    y_bot = 0.0
+    n8 = int((L - 4 - SCALE_X0) / (INCH / 8))
+    for k in range(0, n8 + 1):
+        x = SCALE_X0 + k * (INCH / 8)
+        if k % 8 == 0:   tl, tw = 6.5, 0.5     # whole inch
+        elif k % 4 == 0: tl, tw = 4.5, 0.45    # 1/2"
+        elif k % 2 == 0: tl, tw = 3.2, 0.4     # 1/4"
+        else:            tl, tw = 2.1, 0.35    # 1/8"
+        engrave.append(sg.box(x - tw, y_bot + 0.6, x + tw, y_bot + tl))
+        if k % 8 == 0:
+            engrave.append(text_poly(str(k // 8), 3.0, x, y_bot + tl + 2.3,
+                                     va="bottom"))
+    engrave.append(text_poly("in", 3.0, SCALE_X0 + (n8 // 8) * INCH + 4,
+                             y_bot + 4.5, ha="left"))
+
+    # title block in the empty bottom-right cell
+    tcx = gx0 + cw * (COLS - 0.5)
+    tcy = gy1 - ch * (ROWS - 0.5)
+    for i, line in enumerate(["CIRCUIT", "STENCIL", "RULER"]):
+        engrave.append(text_poly(line, 3.6, tcx, tcy + (1 - i) * 4.4, va="center"))
     engrave = unary_union(engrave)
 
     print(f"symbols={len(syms)}  islands bridged={n_isl}  "

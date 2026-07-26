@@ -5,7 +5,8 @@ artwork** in [`template_ruler.svg`](template_ruler.svg). The 19 hand-drawn
 schematic symbols are parsed straight from the SVG, then only *rearranged and
 resized* onto a tidy plate — the shapes themselves are unchanged.
 
-- an engraved **mm / cm measuring scale** along the top edge (0–18 cm)
+- engraved **dual measuring scales** — centimetres (0–18 cm) along the top edge
+  and inches (0–7″, with ½/¼/⅛″ ticks) along the bottom edge
 - **19 faithful through-cut symbols** you trace with a pen — inverter/Schmitt,
   logic gates, latch & flip-flop blocks, MOSFETs, resistor, inductor,
   capacitor, ground, diode, op-amp, voltage/current sources, meter,
@@ -54,7 +55,7 @@ The 19 symbols are lifted straight from this drawing —
 - **Supports:** none — flat plate, printed engraved-face up.
 
 Symbol channels are **1.5 mm** wide (trace with a fine pen or 0.5–0.7 mm
-pencil); the engraved scale is **0.8 mm** deep.
+pencil); the engraved scales are **0.8 mm** deep.
 
 ## Regenerating / customizing
 
