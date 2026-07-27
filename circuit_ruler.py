@@ -171,8 +171,6 @@ def build_layout():
         if mm % 10 == 0:
             engrave.append(text_poly(str(mm // 10), 3.0, x, y_top - tl - 2.3,
                                      va="top"))
-    engrave.append(text_poly("cm", 3.0, SCALE_X0 + (SCALE_MAX // 10) * 10 + 4,
-                             y_top - 4.5, ha="left"))
 
     # inch scale along the BOTTOM edge (ticks point up), 1/8" subdivisions
     y_bot = 0.0
@@ -187,14 +185,16 @@ def build_layout():
         if k % 8 == 0:
             engrave.append(text_poly(str(k // 8), 3.0, x, y_bot + tl + 2.3,
                                      va="bottom"))
-    engrave.append(text_poly("in", 3.0, SCALE_X0 + (n8 // 8) * INCH + 4,
-                             y_bot + 4.5, ha="left"))
 
-    # title block in the empty bottom-right cell
+    # title block in the empty bottom-right cell (carries the unit note)
     tcx = gx0 + cw * (COLS - 0.5)
     tcy = gy1 - ch * (ROWS - 0.5)
-    for i, line in enumerate(["CIRCUIT", "STENCIL", "RULER"]):
-        engrave.append(text_poly(line, 3.6, tcx, tcy + (1 - i) * 4.4, va="center"))
+    lines = [("CIRCUIT", 3.6), ("STENCIL", 3.6), ("RULER", 3.6),
+             ("cm  ·  in", 2.8)]
+    y = tcy + 7.2
+    for txt, sz in lines:
+        engrave.append(text_poly(txt, sz, tcx, y, va="center"))
+        y -= 4.6
     engrave = unary_union(engrave)
 
     print(f"symbols={len(syms)}  islands bridged={n_isl}  "
@@ -223,22 +223,23 @@ def _draw(ax, geom, **kw):
         if p.geom_type == "Polygon" and not p.is_empty:
             ax.add_patch(PathPatch(_poly_path(p), **kw))
 
-def render_png(body, through, engrave, bridges, path):
-    fig, ax = plt.subplots(figsize=(L / 22, (W + 22) / 22), dpi=200)
+def render_png(body, through, engrave, bridges, path, dpi=260, margin=3.0):
+    # full-bleed: the plate fills the frame (no title / white borders) so the
+    # image doesn't look shrunk when a browser scales it to fit.
+    fw, fh = (L + 2 * margin) / 20.0, (W + 2 * margin) / 20.0
+    fig = plt.figure(figsize=(fw, fh), dpi=dpi)
+    ax = fig.add_axes([0, 0, 1, 1])                        # axes fill the figure
     plate = body.difference(through)
     _draw(ax, plate, facecolor="#2f6f8f", edgecolor="#12384a", linewidth=0.8, zorder=1)
     _draw(ax, engrave, facecolor="#bfe3f2", edgecolor="none", zorder=2)
     _draw(ax, bridges.intersection(plate), facecolor="none",
           edgecolor="#e8813a", linewidth=1.1, zorder=3)      # highlight ties
-    ax.set_xlim(-6, L + 6); ax.set_ylim(-6, W + 12)
+    ax.set_xlim(-margin, L + margin); ax.set_ylim(-margin, W + margin)
     ax.set_aspect("equal"); ax.axis("off")
-    ax.set_title("Circuit Stencil Ruler — faithful SVG symbols + island "
-                 f"bridges (orange)   {L:.0f}×{W:.0f}×{T:.0f} mm",
-                 fontsize=9, color="#12384a", pad=6)
-    fig.tight_layout()
-    fig.savefig(path, bbox_inches="tight", facecolor="white")
+    fig.savefig(path, dpi=dpi, facecolor="white", pad_inches=0)
     plt.close(fig)
-    print("wrote", path)
+    from PIL import Image
+    print("wrote", path, Image.open(path).size)
 
 # ----------------------------------------------------------------------------
 # STL
